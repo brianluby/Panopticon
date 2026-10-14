@@ -233,8 +233,6 @@ Covers sampling penalties for LLM repetition collapse, stdin transport bypassing
 - **[tauri-ui](https://github.com/agmmnn/tauri-ui)** — inspired the dark/purple visual direction and the README structure
 - **[GooEye](https://github.com/sleepti3ht/GooEye)** — sibling project: a stealth sniper bot for 闲鱼(Goofish)
 
-> _Built something with Panopticon's architecture? [Open a PR](https://github.com/sleepti3ht/Panopticon/pulls) adding it to this list — one line with a link and a short description._
-
 ---
 
 ## License

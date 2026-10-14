@@ -19,30 +19,27 @@ async def get_vendors(query: str = None, limit: int = 50) -> list:
         db.row_factory = aiosqlite.Row
 
         if query:
-            async with db.execute(
-                """
-                SELECT DISTINCT vendor, COUNT(*) as cve_count
+            sql = """
+                SELECT vendor, COUNT(*) AS cve_count
                 FROM affected_products
                 WHERE vendor LIKE ?
                 GROUP BY vendor
                 ORDER BY cve_count DESC
                 LIMIT ?
-                """,
-                (f"%{query.lower()}%", limit),
-            ) as cursor:
-                rows = await cursor.fetchall()
+            """
+            params = (f"%{query.lower()}%", limit)
         else:
-            async with db.execute(
-                """
-                SELECT DISTINCT vendor, COUNT(*) as cve_count
+            sql = """
+                SELECT vendor, COUNT(*) AS cve_count
                 FROM affected_products
                 GROUP BY vendor
                 ORDER BY cve_count DESC
                 LIMIT ?
-                """,
-                (limit,),
-            ) as cursor:
-                rows = await cursor.fetchall()
+            """
+            params = (limit,)
+
+        async with db.execute(sql, params) as cursor:
+            rows = await cursor.fetchall()
 
         return [{"vendor": row["vendor"], "cve_count": row["cve_count"]} for row in rows]
 
