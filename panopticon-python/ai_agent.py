@@ -15,6 +15,10 @@ import httpx
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from utils import sanitize_degenerate
+from typing import Optional
+
+# Global state for daemon streaming
+_current_daemon_request_id: Optional[int] = None
 
 load_dotenv()
 
@@ -159,8 +163,12 @@ class CVEAgent:
                             token = delta.get("content", "")
                             if token:
                                 full_text += token
-                                # Write token to stdout, flush immediately
-                                print(token, end="", flush=True)
+                                # If in daemon mode, emit JSON stream chunk; else raw text
+                                global _current_daemon_request_id
+                                if _current_daemon_request_id is not None:
+                                    print(json.dumps({"id": _current_daemon_request_id, "stream": token}), flush=True)
+                                else:
+                                    print(token, end="", flush=True)
                     except json.JSONDecodeError:
                         continue
                 return full_text
@@ -268,6 +276,86 @@ async def run_mitigation(cve_id: str, model_name: str):
         await agent.close()
 
 
+# ==========================================
+# Daemon mode: persistent process with JSON-RPC-like protocol
+# ==========================================
+
+async def daemon_loop():
+    """
+    Read JSON requests from stdin, dispatch to methods, write JSON responses to stdout.
+    """
+    logger.info("Daemon started, waiting for requests...")
+    
+    while True:
+        try:
+            # Читаем строку из stdin асинхронно, чтобы не блокировать event loop
+            line = await asyncio.get_event_loop().run_in_executor(None, sys.stdin.readline)
+            if not line:
+                logger.info("stdin closed, daemon exiting")
+                break
+            
+            line = line.strip()
+            if not line:
+                continue
+            
+            try:
+                request = json.loads(line)
+            except json.JSONDecodeError as e:
+                error_response = {"error": f"Invalid JSON: {e}"}
+                print(json.dumps(error_response), flush=True)
+                continue
+            
+            request_id = request.get("id", 0)
+            method = request.get("method", "")
+            params = request.get("params", {})
+            
+            logger.info(f"Daemon received request id={request_id} method={method}")
+            
+            if method == "chat":
+                cve_id = params.get("cve_id", "")
+                messages = params.get("messages", [])
+                model = params.get("model", DEFAULT_MODEL)
+                
+                global _current_daemon_request_id
+                _current_daemon_request_id = request_id
+                
+                try:
+                    response = await chat_with_history(cve_id, json.dumps(messages), model)
+                finally:
+                    _current_daemon_request_id = None
+                
+                # Send final result
+                response_obj = {"id": request_id, "result": response}
+                print(json.dumps(response_obj), flush=True)
+                
+            elif method == "mitigate":
+                cve_id = params.get("cve_id", "")
+                model = params.get("model", DEFAULT_MODEL)
+                
+                agent = CVEAgent(model)
+                try:
+                    await agent.connect_to_mcp()
+                    result = await agent.generate_mitigation(cve_id)
+                finally:
+                    await agent.close()
+                
+                response_obj = {"id": request_id, "result": result}
+                print(json.dumps(response_obj), flush=True)
+                
+            else:
+                error_response = {"id": request_id, "error": f"Unknown method: {method}"}
+                print(json.dumps(error_response), flush=True)
+                
+        except Exception as e:
+            logger.exception(f"Daemon loop error: {e}")
+            error_response = {"error": str(e)}
+            print(json.dumps(error_response), flush=True)
+
+
+# ==========================================
+# Application entry point
+# ==========================================
+
 if __name__ == "__main__":
     if sys.stdout.encoding != "utf-8":
         sys.stdout.reconfigure(encoding="utf-8")
@@ -276,8 +364,12 @@ if __name__ == "__main__":
     if sys.stdin.encoding != "utf-8":
         sys.stdin.reconfigure(encoding="utf-8")
 
+    # --daemon: persistent process with JSON-RPC-like protocol
+    if len(sys.argv) >= 2 and sys.argv[1] == "--daemon":
+        asyncio.run(daemon_loop())
+
     # --chat reads conversation history from stdin (bypasses Windows 32KB CLI limit)
-    if len(sys.argv) >= 3 and sys.argv[1] == "--chat":
+    elif len(sys.argv) >= 3 and sys.argv[1] == "--chat":
         cve_id = sys.argv[2]
         model = sys.argv[3] if len(sys.argv) > 3 else DEFAULT_MODEL
         messages_json = sys.stdin.read()
@@ -292,7 +384,8 @@ if __name__ == "__main__":
     else:
         logger.error("Invalid arguments")
         print(
-            "Usage: ai_agent.py --mitigate <cve_id> [model] OR "
+            "Usage: ai_agent.py --daemon OR "
+            "ai_agent.py --mitigate <cve_id> [model] OR "
             "ai_agent.py --chat <cve_id> [model] (history via stdin)",
             file=sys.stderr,
         )

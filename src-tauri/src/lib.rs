@@ -1,12 +1,90 @@
 use tauri::command;
-use std::process::Command;
-use std::io::Write;
-use std::process::Stdio;
 use tauri::Emitter;
-use std::io::Read;
+use tauri::Manager;
+use std::sync::Arc;
+use std::process::Stdio;
 use std::env;
 use std::path::PathBuf;
 
+use tokio::process::{Child, Command as TokioCommand};
+use tokio::sync::Mutex;
+use tokio::io::{AsyncWriteExt, AsyncBufReadExt, BufReader};
+use serde_json::{json, Value};
+// ==========================================
+// Daemon Manager
+// ==========================================
+
+pub struct DaemonManager {
+    child: Arc<Mutex<Child>>,
+}
+
+impl DaemonManager {
+    pub async fn new() -> Result<Self, String> {
+        let (script_path, python_path) = python_paths("ai_agent.py")?;
+        let mut child = TokioCommand::new(&python_path)
+            .arg(&script_path)
+            .arg("--daemon")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("Failed to spawn daemon: {}", e))?;
+
+        // Log stderr in background to catch Python crashes
+        if let Some(stderr) = child.stderr.take() {
+            tokio::spawn(async move {
+                let mut reader = BufReader::new(stderr);
+                let mut line = String::new();
+                while let Ok(n) = reader.read_line(&mut line).await {
+                    if n == 0 { break; }
+                    eprint!("[Python Daemon] {}", line);
+                    line.clear();
+                }
+            });
+        }
+
+        Ok(Self { child: Arc::new(Mutex::new(child)) })
+    }
+
+    pub async fn send_request(&self, app: &tauri::AppHandle, method: &str, params: Value) -> Result<String, String> {
+        let request_id = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis();
+        let request = json!({
+            "id": request_id,
+            "method": method,
+            "params": params
+        }).to_string() + "\n";
+
+        let mut child = self.child.lock().await;
+        let stdin = child.stdin.as_mut().ok_or("Daemon stdin lost")?;
+        stdin.write_all(request.as_bytes()).await.map_err(|e| e.to_string())?;
+        stdin.flush().await.map_err(|e| e.to_string())?;
+
+        let stdout = child.stdout.as_mut().ok_or("Daemon stdout lost")?;
+        let mut reader = BufReader::new(stdout);
+        let mut line = String::new();
+
+        let final_result = loop {
+            line.clear();
+            let n = reader.read_line(&mut line).await.map_err(|e| e.to_string())?;
+            if n == 0 {
+                return Err("Daemon closed connection unexpectedly".to_string());
+            }
+            
+            let parsed: Value = serde_json::from_str(&line)
+                .map_err(|e| format!("Invalid JSON from daemon: {}, line: {}", e, line))?;
+            
+            if let Some(stream_chunk) = parsed.get("stream").and_then(|v| v.as_str()) {
+                let _ = app.emit("llm_chunk", stream_chunk);
+            } else if let Some(result) = parsed.get("result").and_then(|v| v.as_str()) {
+                break Some(result.to_string()); // <-- Чистый выход из цикла
+            } else if let Some(error) = parsed.get("error").and_then(|v| v.as_str()) {
+                return Err(error.to_string());
+            }
+        };
+
+        final_result.ok_or_else(|| "No result received from daemon".to_string())
+    }
+}
 // Helper: resolve paths to Python script and interpreter.
 // Keeps the per-command boilerplate minimal and consistent.
 fn python_paths(script_name: &str) -> Result<(PathBuf, PathBuf), String> {
@@ -21,11 +99,13 @@ fn python_paths(script_name: &str) -> Result<(PathBuf, PathBuf), String> {
 // Converts non-zero exit codes into Rust errors with stderr content.
 fn run_python(script_name: &str, args: &[&str]) -> Result<String, String> {
     let (script_path, python_path) = python_paths(script_name)?;
-    let output = Command::new(&python_path)
+    
+    let output = std::process::Command::new(&python_path)
         .arg(&script_path)
         .args(args)
         .output()
         .map_err(|e| format!("Failed to execute python at {:?}: {}", python_path, e))?;
+        
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
     } else {
@@ -68,8 +148,17 @@ async fn global_search(query: String) -> Result<String, String> {
 // ==========================================
 
 #[command]
-async fn generate_mitigation(cve_id: String, model: String) -> Result<String, String> {
-    run_python("ai_agent.py", &["--mitigate", &cve_id, &model])
+async fn generate_mitigation(
+    app: tauri::AppHandle,
+    cve_id: String, 
+    model: String
+) -> Result<String, String> {
+    let daemon = app.state::<DaemonManager>();
+    let params = json!({
+        "cve_id": cve_id,
+        "model": model
+    });
+    daemon.send_request(&app, "mitigate", params).await
 }
 #[command]
 async fn chat_with_agent(
@@ -78,49 +167,19 @@ async fn chat_with_agent(
     messages: String,
     model: String,
 ) -> Result<String, String> {
-    let (script_path, python_path) = python_paths("ai_agent.py")?;
-
-    let mut child = Command::new(&python_path)
-        .arg(&script_path)
-        .arg("--chat")
-        .arg(&cve_id)
-        .arg(&model)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("Failed to spawn python: {}", e))?;
-
-    {
-        let mut stdin = child.stdin.take().ok_or("Failed to open stdin")?;
-        stdin.write_all(messages.as_bytes()).map_err(|e| format!("Stdin write error: {}", e))?;
-    }
-
-    let mut stdout = child.stdout.take().ok_or("Failed to capture stdout")?;
-    let mut full_output = String::new();
-    let mut buffer = [0; 1024];
-
-    loop {
-        let n = stdout.read(&mut buffer).map_err(|e| format!("Read error: {}", e))?;
-        if n == 0 {
-            break; 
-        }
-        let chunk = String::from_utf8_lossy(&buffer[..n]).to_string();
-        full_output.push_str(&chunk);
-        
-        let _ = app.emit("llm_chunk", chunk.clone());
-    }
-
-    let status = child.wait().map_err(|e| format!("Wait error: {}", e))?;
+    let daemon = app.state::<DaemonManager>();
     
-    if !status.success() {
-        let mut stderr = child.stderr.take().unwrap();
-        let mut err_buf = String::new();
-        let _ = stderr.read_to_string(&mut err_buf);
-        return Err(format!("Python execution failed:\n{}", err_buf));
-    }
-
-    Ok(full_output)
+    // Parse messages string into JSON Value to pass cleanly to Python
+    let messages_val: Value = serde_json::from_str(&messages)
+        .map_err(|e| format!("Invalid messages JSON: {}", e))?;
+    
+    let params = json!({
+        "cve_id": cve_id,
+        "messages": messages_val,
+        "model": model
+    });
+    
+    daemon.send_request(&app, "chat", params).await
 }
 
 #[command]
@@ -229,6 +288,21 @@ async fn set_report_tags(report_id: i64, tags: String) -> Result<String, String>
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .setup(|app| {
+            let handle = app.handle().clone();
+            // Block on daemon initialization. If it fails, the app won't start.
+            match tauri::async_runtime::block_on(DaemonManager::new()) {
+                Ok(manager) => {
+                    handle.manage(manager);
+                    println!("Python Daemon initialized successfully");
+                    Ok(())
+                }
+                Err(e) => {
+                    eprintln!("Failed to start Python daemon: {}", e);
+                    Err(e.into())
+                }
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             get_graph_data,
             get_vendors,
