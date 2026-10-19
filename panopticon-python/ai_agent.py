@@ -209,12 +209,17 @@ CRITICAL INSTRUCTIONS:
         return await self._call_llm(messages, temperature=0.1, max_tokens=2000)
 
     async def close(self):
-        """Clean up resources."""
+        """Clean up resources, suppressing known anyio teardown quirks."""
         if self._exit_stack:
-            await self._exit_stack.aclose()
+            try:
+                await self._exit_stack.aclose()
+            except (RuntimeError, ExceptionGroup):
+                logger.debug("Suppressed anyio teardown noise during MCP close")
+            except Exception as e:
+                logger.warning(f"Non-fatal error during agent cleanup: {e}")
+                
         await self.http_client.aclose()
         logger.debug("Agent resources cleaned up")
-
 
 # ==========================================
 # Functions for chat with conversation history
@@ -288,7 +293,6 @@ async def daemon_loop():
     
     while True:
         try:
-            # Читаем строку из stdin асинхронно, чтобы не блокировать event loop
             line = await asyncio.get_event_loop().run_in_executor(None, sys.stdin.readline)
             if not line:
                 logger.info("stdin closed, daemon exiting")

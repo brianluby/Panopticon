@@ -76,7 +76,7 @@ impl DaemonManager {
             if let Some(stream_chunk) = parsed.get("stream").and_then(|v| v.as_str()) {
                 let _ = app.emit("llm_chunk", stream_chunk);
             } else if let Some(result) = parsed.get("result").and_then(|v| v.as_str()) {
-                break Some(result.to_string()); // <-- Чистый выход из цикла
+                break Some(result.to_string());
             } else if let Some(error) = parsed.get("error").and_then(|v| v.as_str()) {
                 return Err(error.to_string());
             }
