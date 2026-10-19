@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { DataSet, Network } from "vis-network/standalone";
 
 // ==========================================
@@ -429,8 +430,24 @@ async function sendChatMessage(isRegenerate = false) {
     }
   }
 
+  const chatHistory = document.getElementById("chat-history");
+  const streamingMsgDiv = document.createElement("div");
+  streamingMsgDiv.className = "chat-message assistant streaming";
   const loadingId = "loading-" + Date.now();
-  addLoadingMessage(loadingId);
+  
+  streamingMsgDiv.innerHTML = `<div id="${loadingId}" class="loading-spinner">Agent is thinking...</div>`;
+  chatHistory.appendChild(streamingMsgDiv);
+  chatHistory.scrollTop = chatHistory.scrollHeight;
+
+  let fullResponse = "";
+  
+  const unlisten = await listen("llm_chunk", (event) => {
+    const chunk = event.payload;
+    fullResponse += chunk;
+    
+    streamingMsgDiv.innerHTML = parseMarkdown(fullResponse);
+    chatHistory.scrollTop = chatHistory.scrollHeight;
+  });
 
   try {
     const response = await invoke("chat_with_agent", { 
@@ -439,26 +456,25 @@ async function sendChatMessage(isRegenerate = false) {
       model: currentSelectedModel 
     });
     
-    const loadingEl = document.getElementById(loadingId);
-    if (loadingEl) {
-      loadingEl.parentElement.remove();
-    }
+    unlisten();
+    
+    streamingMsgDiv.remove();
+    addChatMessage("assistant", response, false);
     
     currentConversation.push({ role: "assistant", content: response });
     if (currentConversation.length > 10) {
       currentConversation = currentConversation.slice(-10);
     }
     
-    addChatMessage("assistant", response, false);
-    
     if (currentConversation.length >= 2) {
       await autoSaveConversation();
     }
     
   } catch (error) {
-    const loadingEl = document.getElementById(loadingId);
-    if (loadingEl) {
-      loadingEl.parentElement.innerHTML = `<span class="error">Error: ${error}</span>`;
+    unlisten();
+    const spinner = document.getElementById(loadingId);
+    if (spinner) {
+      spinner.parentElement.innerHTML = `<span class="error">Error: ${error}</span>`;
     }
   } finally {
     setProcessingState(false);

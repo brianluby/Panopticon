@@ -842,3 +842,18 @@ body.light-theme ::-webkit-scrollbar-thumb:hover { background: var(--text-second
   font-weight: 700;
   letter-spacing: 0.5px;
 }
+
+/* Streaming indicator */
+.chat-message.streaming {
+  opacity: 0.9;
+}
+
+.chat-message.streaming .loading-spinner {
+  display: inline-block;
+  animation: pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}

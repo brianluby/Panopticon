@@ -104,108 +104,66 @@ class CVEAgent:
             logger.exception(f"MCP tool call failed for {cve_id}")
             return f"Exception calling MCP tool: {e}"
 
-    async def _call_llm(self, messages: list[dict], temperature: float, max_tokens: int) -> str:
+    async def _call_llm(self, messages: list, temperature: float = 0.7, max_tokens: int = 4096, stream: bool = False) -> str:
         """
-        Internal LLM call with caching and error categorization.
-        Returns response text or error message.
+        Call OpenRouter API. If stream=True, yields tokens via stdout line-by-line.
+        Falls back to non-streaming if provider doesn't support it.
         """
-        # Generate cache key from model + messages hash
-        cache_key = f"{self.model_name}:{hash(json.dumps(messages, sort_keys=True))}"
-        
-        # Check cache (with TTL)
-        if cache_key in _response_cache:
-            cached_text, cached_time = _response_cache[cache_key]
-            import time
-            if time.time() - cached_time < CACHE_TTL_SECONDS:
-                logger.info(f"Cache hit for {self.model_name}")
-                return cached_text
-            else:
-                # Expired entry
-                del _response_cache[cache_key]
+        headers = {
+            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+            "Content-Type": "application/json",
+            "HTTP-Referer": "https://github.com/sleepti3ht/Panopticon",
+            "X-Title": "Panopticon CVE Intelligence Map",
+        }
+        payload = {
+            "model": self.model_name,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "top_p": 0.9,
+            "frequency_penalty": 0.4,
+            "presence_penalty": 0.3,
+            "stream": stream,
+        }
 
-        logger.info(f"Calling LLM: model={self.model_name}, messages={len(messages)}")
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            if not stream:
+                resp = await client.post(f"{OPENROUTER_BASE_URL}/chat/completions", json=payload, headers=headers)
+                resp.raise_for_status()
+                data = resp.json()
 
-        try:
-            response = await self.http_client.post(
-                "/chat/completions",
-                json={
-                    "model": self.model_name,
-                    "messages": messages,
-                    "temperature": temperature,
-                    "max_tokens": max_tokens,
-                    "top_p": 0.9,
-                    # Sampling penalties reduce repetition collapse on free-tier models
-                    "frequency_penalty": 0.4,
-                    "presence_penalty": 0.3,
-                },
-                timeout=60.0,
-            )
+                if "error" in data:
+                    err_msg = data["error"].get("message", str(data["error"]))
+                    if "credit" in err_msg.lower():
+                        return f"Error: Provider credit issue - {err_msg}"
+                    elif "rate limit" in err_msg.lower():
+                        return f"Error: Rate limit - {err_msg}"
+                    return f"Error: {err_msg}"
 
-            # Categorize errors by HTTP status
-            if response.status_code == 429:
-                logger.warning("Rate limit exceeded (429)")
-                return "Error: Rate limit exceeded. Please wait a moment or try a different model."
-            
-            if response.status_code == 402:
-                logger.warning("Insufficient credits (402)")
-                return "Error: Insufficient API credits. Please add funds to your OpenRouter account."
-            
-            if response.status_code == 503:
-                logger.warning("Provider unavailable (503)")
-                return "Error: AI provider temporarily unavailable. Please try again later."
+                return data["choices"][0]["message"]["content"]
 
-            if response.status_code != 200:
-                logger.error(f"HTTP error: {response.status_code}")
-                return f"Error: HTTP {response.status_code} - {response.text[:200]}"
-
-            data = response.json()
-
-            # Defensive check: OpenRouter may return 200 with error payload
-            if "error" in data:
-                err_msg = data["error"].get("message", str(data["error"]))
-                
-                # Categorize provider errors
-                if "credit" in err_msg.lower() or "balance" in err_msg.lower():
-                    logger.warning(f"Provider error (credits): {err_msg}")
-                    return f"Error: Provider credit issue - {err_msg}"
-                elif "rate limit" in err_msg.lower():
-                    logger.warning(f"Provider rate limit: {err_msg}")
-                    return f"Error: Rate limit - {err_msg}"
-                elif "overloaded" in err_msg.lower() or "unavailable" in err_msg.lower():
-                    logger.warning(f"Provider overloaded: {err_msg}")
-                    return f"Error: Provider overloaded - {err_msg}"
-                else:
-                    logger.error(f"Provider error: {err_msg}")
-                    return f"Error: Provider error - {err_msg}"
-
-            if "choices" not in data or not data["choices"]:
-                logger.error(f"Unexpected response format: {str(data)[:200]}")
-                return f"Error: Unexpected API response format (no choices)"
-
-            result_text = data["choices"][0]["message"]["content"]
-            # Sanitize before caching: poisoned responses must not persist for 1h
-            if sanitize_degenerate(result_text) != result_text:
-                logger.warning(f"Degenerate repetition detected and truncated ({self.model_name})")
-                result_text = sanitize_degenerate(result_text)            
-            # Store in cache (evict oldest if at capacity)
-            import time
-            if len(_response_cache) >= CACHE_MAX_SIZE:
-                oldest_key = min(_response_cache, key=lambda k: _response_cache[k][1])
-                del _response_cache[oldest_key]
-            _response_cache[cache_key] = (result_text, time.time())
-            
-            logger.info(f"LLM response cached ({len(result_text)} chars)")
-            return result_text
-
-        except httpx.RemoteProtocolError as e:
-            logger.error(f"Connection interrupted: {e}")
-            return "Error: Connection interrupted. Please check your network and try again."
-        except httpx.RequestError as e:
-            logger.error(f"Network error: {e}")
-            return f"Error: Network error - {e}"
-        except Exception as e:
-            logger.exception("Unexpected LLM call error")
-            return f"Error: Unexpected error - {e}"
+            # Streaming mode: parse SSE and write tokens to stdout
+            async with client.stream("POST", f"{OPENROUTER_BASE_URL}/chat/completions", json=payload, headers=headers) as resp:
+                resp.raise_for_status()
+                full_text = ""
+                async for line in resp.aiter_lines():
+                    if not line.startswith("data: "):
+                        continue
+                    data_str = line[6:].strip()
+                    if data_str == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(data_str)
+                        if "choices" in chunk and len(chunk["choices"]) > 0:
+                            delta = chunk["choices"][0].get("delta", {})
+                            token = delta.get("content", "")
+                            if token:
+                                full_text += token
+                                # Write token to stdout, flush immediately
+                                print(token, end="", flush=True)
+                    except json.JSONDecodeError:
+                        continue
+                return full_text
 
     async def generate_mitigation(self, cve_id: str) -> str:
         """Generate a structured mitigation plan for a given CVE."""
@@ -255,43 +213,47 @@ CRITICAL INSTRUCTIONS:
 # ==========================================
 
 
-async def chat_with_history(cve_id: str, messages_json: str, model_name: str) -> str:
-    """Chat with conversation history (accepts JSON string)."""
-    logger.info(f"Chat request: cve_id={cve_id}, model={model_name}")
-    
+async def chat_with_history(cve_id: str, messages_json: str, model: str = DEFAULT_MODEL) -> str:
+    """
+    Chat with history. Returns full response.
+    In streaming mode, tokens are written to stdout as they arrive.
+    """
     try:
         messages = json.loads(messages_json)
-        logger.debug(f"Parsed {len(messages)} messages from JSON")
     except json.JSONDecodeError as e:
-        logger.error(f"Invalid messages JSON: {e}")
-        return "Error: Invalid messages JSON format"
+        return f"Error: Invalid messages JSON - {e}"
 
-    agent = CVEAgent(model_name)
+    agent = CVEAgent(model)
+    cve_context = await agent.get_cve_context(cve_id)
+
+    system_prompt = f"""You are a cybersecurity analyst specializing in CVE triage.
+CVE ID: {cve_id}
+Context: {cve_context}
+
+Provide structured mitigation plans with:
+1. Risk assessment (CVSS, severity, exploitation likelihood)
+2. Immediate actions (version check, emergency mitigation)
+3. Long-term recommendations
+4. Specific commands (version check, upgrade, workaround)
+5. References (vendor advisories, CVE links)
+
+Respond in the same language as the user's question."""
+
+    full_messages = [{"role": "system", "content": system_prompt}] + messages
+
+    # Try streaming first, fallback to non-streaming
     try:
-        await agent.connect_to_mcp()
-        context = await agent.get_cve_context(cve_id)
+        response = await agent._call_llm(full_messages, stream=True)
+    except Exception as e:
+        # Fallback: non-streaming mode
+        response = await agent._call_llm(full_messages, stream=False)
 
-        if "error" in context.lower() or "exception" in context.lower():
-            return f"Failed to get CVE context: {context}"
+    # Sanitize before returning
+    if sanitize_degenerate(response) != response:
+        print(f"\n*[Output truncated: degenerate repetition detected]*", flush=True)
+        response = sanitize_degenerate(response)
 
-        system_prompt = f"""You are a cybersecurity expert analyzing CVE {cve_id}.
-
-Context of the vulnerability:
-{context}
-
-IMPORTANT:
-- Answer in the SAME LANGUAGE as the user's question
-- Use conversation history to maintain context
-- Be concise and technical
-- If asked follow-up questions, refer to previous answers"""
-
-        api_messages = [{"role": "system", "content": system_prompt}]
-        api_messages.extend(messages[-10:])  # Last 10 messages
-
-        return await agent._call_llm(api_messages, temperature=0.2, max_tokens=2000)
-
-    finally:
-        await agent.close()
+    return response
 
 
 async def run_mitigation(cve_id: str, model_name: str):

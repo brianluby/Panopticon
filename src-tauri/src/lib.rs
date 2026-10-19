@@ -2,6 +2,8 @@ use tauri::command;
 use std::process::Command;
 use std::io::Write;
 use std::process::Stdio;
+use tauri::Emitter;
+use std::io::Read;
 use std::env;
 use std::path::PathBuf;
 
@@ -69,13 +71,15 @@ async fn global_search(query: String) -> Result<String, String> {
 async fn generate_mitigation(cve_id: String, model: String) -> Result<String, String> {
     run_python("ai_agent.py", &["--mitigate", &cve_id, &model])
 }
-
 #[command]
-async fn chat_with_agent(cve_id: String, messages: String, model: String) -> Result<String, String> {
+async fn chat_with_agent(
+    app: tauri::AppHandle,
+    cve_id: String,
+    messages: String,
+    model: String,
+) -> Result<String, String> {
     let (script_path, python_path) = python_paths("ai_agent.py")?;
 
-    // Pass conversation history via stdin: Windows CLI args are limited to ~32KB,
-    // and long chats with mitigation payloads exceed that silently.
     let mut child = Command::new(&python_path)
         .arg(&script_path)
         .arg("--chat")
@@ -85,25 +89,38 @@ async fn chat_with_agent(cve_id: String, messages: String, model: String) -> Res
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| format!("Failed to spawn python at {:?}: {}", python_path, e))?;
+        .map_err(|e| format!("Failed to spawn python: {}", e))?;
 
-    // Write payload, then drop stdin so the child sees EOF
     {
-        let stdin = child.stdin.as_mut().ok_or("Failed to open python stdin")?;
-        stdin
-            .write_all(messages.as_bytes())
-            .map_err(|e| format!("Failed to write to python stdin: {}", e))?;
+        let mut stdin = child.stdin.take().ok_or("Failed to open stdin")?;
+        stdin.write_all(messages.as_bytes()).map_err(|e| format!("Stdin write error: {}", e))?;
     }
 
-    let output = child
-        .wait_with_output()
-        .map_err(|e| format!("Failed to wait for python: {}", e))?;
+    let mut stdout = child.stdout.take().ok_or("Failed to capture stdout")?;
+    let mut full_output = String::new();
+    let mut buffer = [0; 1024];
 
-    if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).to_string())
-    } else {
-        Err(format!("Python error: {}", String::from_utf8_lossy(&output.stderr)))
+    loop {
+        let n = stdout.read(&mut buffer).map_err(|e| format!("Read error: {}", e))?;
+        if n == 0 {
+            break; 
+        }
+        let chunk = String::from_utf8_lossy(&buffer[..n]).to_string();
+        full_output.push_str(&chunk);
+        
+        let _ = app.emit("llm_chunk", chunk.clone());
     }
+
+    let status = child.wait().map_err(|e| format!("Wait error: {}", e))?;
+    
+    if !status.success() {
+        let mut stderr = child.stderr.take().unwrap();
+        let mut err_buf = String::new();
+        let _ = stderr.read_to_string(&mut err_buf);
+        return Err(format!("Python execution failed:\n{}", err_buf));
+    }
+
+    Ok(full_output)
 }
 
 #[command]
