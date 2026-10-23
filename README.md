@@ -12,6 +12,7 @@
 [![Vanilla JS](https://img.shields.io/badge/vanilla-es6-black?style=flat&logo=javascript&color=1a1b26)](https://developer.mozilla.org/en-US/docs/Web/JavaScript)
 [![MCP](https://img.shields.io/badge/MCP-server-black?style=flat&color=7c3aed)](https://modelcontextprotocol.io)
 [![CISA KEV](https://img.shields.io/badge/CISA-KEV-black?style=flat&color=dc2626)](https://www.cisa.gov/known-exploited-vulnerabilities-catalog)
+[![XERJ Corpus Hub contributor](https://hub.xerj.org/contributors/sleepti3ht/badge.svg)](https://hub.xerj.org/contributors/sleepti3ht)
 [![License](https://img.shields.io/github/license/sleepti3ht/Panopticon?style=flat&color=7c3aed)](LICENSE)
 
 </div>
