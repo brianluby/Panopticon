@@ -3,8 +3,10 @@ Generate mock data for public repository demos.
 Creates 50 fake CVE entries for testing without real NVD data.
 CLI usage: python seed_mock.py
 """
+
 import asyncio
 import random
+
 from db import init_db, insert_cve
 
 MOCK_VENDORS = [

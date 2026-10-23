@@ -3,22 +3,23 @@ Panopticon CVE AI Agent.
 Handles mitigation generation and chat with history via OpenRouter and MCP server.
 Includes response caching and structured error handling.
 """
+
 import asyncio
 import json
 import logging
 import os
 import sys
-from pathlib import Path
 from contextlib import AsyncExitStack
-from dotenv import load_dotenv
+from pathlib import Path
+
 import httpx
+from dotenv import load_dotenv
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from utils import sanitize_degenerate
-from typing import Optional
 
 # Global state for daemon streaming
-_current_daemon_request_id: Optional[int] = None
+_current_daemon_request_id: int | None = None
 
 load_dotenv()
 
@@ -108,7 +109,13 @@ class CVEAgent:
             logger.exception(f"MCP tool call failed for {cve_id}")
             return f"Exception calling MCP tool: {e}"
 
-    async def _call_llm(self, messages: list, temperature: float = 0.7, max_tokens: int = 4096, stream: bool = False) -> str:
+    async def _call_llm(
+        self,
+        messages: list,
+        temperature: float = 0.7,
+        max_tokens: int = 4096,
+        stream: bool = False,
+    ) -> str:
         """
         Call OpenRouter API. If stream=True, yields tokens via stdout line-by-line.
         Falls back to non-streaming if provider doesn't support it.
@@ -132,7 +139,11 @@ class CVEAgent:
 
         async with httpx.AsyncClient(timeout=120.0) as client:
             if not stream:
-                resp = await client.post(f"{OPENROUTER_BASE_URL}/chat/completions", json=payload, headers=headers)
+                resp = await client.post(
+                    f"{OPENROUTER_BASE_URL}/chat/completions",
+                    json=payload,
+                    headers=headers,
+                )
                 resp.raise_for_status()
                 data = resp.json()
 
@@ -147,7 +158,12 @@ class CVEAgent:
                 return data["choices"][0]["message"]["content"]
 
             # Streaming mode: parse SSE and write tokens to stdout
-            async with client.stream("POST", f"{OPENROUTER_BASE_URL}/chat/completions", json=payload, headers=headers) as resp:
+            async with client.stream(
+                "POST",
+                f"{OPENROUTER_BASE_URL}/chat/completions",
+                json=payload,
+                headers=headers,
+            ) as resp:
                 resp.raise_for_status()
                 full_text = ""
                 async for line in resp.aiter_lines():
@@ -166,7 +182,15 @@ class CVEAgent:
                                 # If in daemon mode, emit JSON stream chunk; else raw text
                                 global _current_daemon_request_id
                                 if _current_daemon_request_id is not None:
-                                    print(json.dumps({"id": _current_daemon_request_id, "stream": token}), flush=True)
+                                    print(
+                                        json.dumps(
+                                            {
+                                                "id": _current_daemon_request_id,
+                                                "stream": token,
+                                            }
+                                        ),
+                                        flush=True,
+                                    )
                                 else:
                                     print(token, end="", flush=True)
                     except json.JSONDecodeError:
@@ -217,16 +241,19 @@ CRITICAL INSTRUCTIONS:
                 logger.debug("Suppressed anyio teardown noise during MCP close")
             except Exception as e:
                 logger.warning(f"Non-fatal error during agent cleanup: {e}")
-                
+
         await self.http_client.aclose()
         logger.debug("Agent resources cleaned up")
+
 
 # ==========================================
 # Functions for chat with conversation history
 # ==========================================
 
 
-async def chat_with_history(cve_id: str, messages_json: str, model: str = DEFAULT_MODEL) -> str:
+async def chat_with_history(
+    cve_id: str, messages_json: str, model: str = DEFAULT_MODEL
+) -> str:
     """
     Chat with history. Returns full response.
     In streaming mode, tokens are written to stdout as they arrive.
@@ -257,13 +284,13 @@ Respond in the same language as the user's question."""
     # Try streaming first, fallback to non-streaming
     try:
         response = await agent._call_llm(full_messages, stream=True)
-    except Exception as e:
+    except Exception:
         # Fallback: non-streaming mode
         response = await agent._call_llm(full_messages, stream=False)
 
     # Sanitize before returning
     if sanitize_degenerate(response) != response:
-        print(f"\n*[Output truncated: degenerate repetition detected]*", flush=True)
+        print("\n*[Output truncated: degenerate repetition detected]*", flush=True)
         response = sanitize_degenerate(response)
 
     return response
@@ -285,71 +312,79 @@ async def run_mitigation(cve_id: str, model_name: str):
 # Daemon mode: persistent process with JSON-RPC-like protocol
 # ==========================================
 
+
 async def daemon_loop():
     """
     Read JSON requests from stdin, dispatch to methods, write JSON responses to stdout.
     """
     logger.info("Daemon started, waiting for requests...")
-    
+
     while True:
         try:
-            line = await asyncio.get_event_loop().run_in_executor(None, sys.stdin.readline)
+            line = await asyncio.get_event_loop().run_in_executor(
+                None, sys.stdin.readline
+            )
             if not line:
                 logger.info("stdin closed, daemon exiting")
                 break
-            
+
             line = line.strip()
             if not line:
                 continue
-            
+
             try:
                 request = json.loads(line)
             except json.JSONDecodeError as e:
                 error_response = {"error": f"Invalid JSON: {e}"}
                 print(json.dumps(error_response), flush=True)
                 continue
-            
+
             request_id = request.get("id", 0)
             method = request.get("method", "")
             params = request.get("params", {})
-            
+
             logger.info(f"Daemon received request id={request_id} method={method}")
-            
+
             if method == "chat":
                 cve_id = params.get("cve_id", "")
                 messages = params.get("messages", [])
                 model = params.get("model", DEFAULT_MODEL)
-                
+
                 global _current_daemon_request_id
                 _current_daemon_request_id = request_id
-                
+
                 try:
-                    response = await chat_with_history(cve_id, json.dumps(messages), model)
+                    response = await chat_with_history(
+                        cve_id, json.dumps(messages), model
+                    )
                 finally:
                     _current_daemon_request_id = None
-                
+
                 # Send final result
                 response_obj = {"id": request_id, "result": response}
                 print(json.dumps(response_obj), flush=True)
-                
+
             elif method == "mitigate":
                 cve_id = params.get("cve_id", "")
                 model = params.get("model", DEFAULT_MODEL)
-                
+
                 agent = CVEAgent(model)
                 try:
                     await agent.connect_to_mcp()
                     result = await agent.generate_mitigation(cve_id)
                 finally:
                     await agent.close()
-                
+
                 response_obj = {"id": request_id, "result": result}
                 print(json.dumps(response_obj), flush=True)
-                
+
             else:
-                error_response = {"id": request_id, "error": f"Unknown method: {method}"}
+                error_response = {
+                    "id": request_id,
+                    "error": f"Unknown method: {method}",
+                }
                 print(json.dumps(error_response), flush=True)
-                
+
         except Exception as e:
             logger.exception(f"Daemon loop error: {e}")
             error_response = {"error": str(e)}

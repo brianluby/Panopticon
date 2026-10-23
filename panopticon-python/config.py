@@ -2,8 +2,10 @@
 Configuration for Panopticon CVE Map.
 Loads environment variables and defines application constants.
 """
+
 import os
 from pathlib import Path
+
 from dotenv import load_dotenv
 
 load_dotenv()

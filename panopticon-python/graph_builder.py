@@ -3,13 +3,15 @@ Build graph data from the database for vis-network rendering.
 CLI usage: python graph_builder.py [vendor] [min_year] [depth]
 Outputs JSON with nodes and edges to stdout.
 """
-import sys
+
+import asyncio
 import json
 import os
+import sys
+
 import aiosqlite
-import asyncio
-import networkx as nx
 import httpx
+import networkx as nx
 
 # Resolve DB path relative to this script's location
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -40,11 +42,14 @@ def _ensure_kev_loaded() -> None:
                             "date_added": vuln.get("dateAdded", ""),
                             "due_date": vuln.get("dueDate", ""),
                             "required_action": vuln.get("requiredAction", ""),
-                            "known_ransomware_usage": vuln.get("knownRansomwareCampaignUse", "Unknown"),
+                            "known_ransomware_usage": vuln.get(
+                                "knownRansomwareCampaignUse", "Unknown"
+                            ),
                         }
     except Exception as e:
         print(f"KEV load error: {e}", file=sys.stderr)
     _kev_loaded = True
+
 
 async def get_cve_details(db, cve_id: str) -> dict:
     """Retrieve full CVE information from the database."""

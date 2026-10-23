@@ -16,6 +16,8 @@ def mask_url(url: str) -> str:
     if "?" in url:
         return url.split("?")[0] + "?..."
     return url
+
+
 import re
 
 # Degenerate repetition detection for LLM outputs
@@ -28,10 +30,10 @@ def _max_consecutive_repeats(tokens: list, n: int) -> int:
     best = 1
     i = 0
     while i + 2 * n <= len(tokens):
-        if tokens[i:i + n] == tokens[i + n:i + 2 * n]:
+        if tokens[i : i + n] == tokens[i + n : i + 2 * n]:
             run = 2
             j = i + 2 * n
-            while j + n <= len(tokens) and tokens[j:j + n] == tokens[i:i + n]:
+            while j + n <= len(tokens) and tokens[j : j + n] == tokens[i : i + n]:
                 run += 1
                 j += n
             best = max(best, run)

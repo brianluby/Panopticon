@@ -2,6 +2,7 @@
 Database schema and persistence layer for Panopticon CVE Map.
 Uses aiosqlite for async SQLite operations.
 """
+
 import aiosqlite
 from config import DB_PATH
 

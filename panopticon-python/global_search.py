@@ -4,11 +4,13 @@ Searches by: cve_id, description, vendor, product, cwe_id.
 CLI usage: python global_search.py <query>
 Outputs JSON array to stdout.
 """
-import sys
+
+import asyncio
 import json
 import os
+import sys
+
 import aiosqlite
-import asyncio
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(SCRIPT_DIR, "panopticon.db")
@@ -36,13 +38,17 @@ async def global_search(query: str, limit: int = 50) -> list:
             (search_term, limit),
         ) as cursor:
             for row in await cursor.fetchall():
-                results.append({
-                    "type": "CVE",
-                    "id": row["cve_id"],
-                    "title": row["cve_id"],
-                    "subtitle": f"CVSS {row['cvss_score']} • {row['severity']}",
-                    "year": row["published_date"][:4] if row["published_date"] else None,
-                })
+                results.append(
+                    {
+                        "type": "CVE",
+                        "id": row["cve_id"],
+                        "title": row["cve_id"],
+                        "subtitle": f"CVSS {row['cvss_score']} • {row['severity']}",
+                        "year": row["published_date"][:4]
+                        if row["published_date"]
+                        else None,
+                    }
+                )
 
         # Search by description (only if limit not yet reached)
         if len(results) < limit:
@@ -63,13 +69,15 @@ async def global_search(query: str, limit: int = 50) -> list:
                             if len(row["description"]) > 80
                             else row["description"]
                         )
-                        results.append({
-                            "type": "CVE",
-                            "id": row["cve_id"],
-                            "title": row["cve_id"],
-                            "subtitle": desc,
-                            "year": None,
-                        })
+                        results.append(
+                            {
+                                "type": "CVE",
+                                "id": row["cve_id"],
+                                "title": row["cve_id"],
+                                "subtitle": desc,
+                                "year": None,
+                            }
+                        )
 
         # Search by vendor
         if len(results) < limit:
@@ -85,13 +93,15 @@ async def global_search(query: str, limit: int = 50) -> list:
                 (search_term, limit - len(results)),
             ) as cursor:
                 for row in await cursor.fetchall():
-                    results.append({
-                        "type": "Vendor",
-                        "id": row["vendor"],
-                        "title": row["vendor"],
-                        "subtitle": f"{row['cve_count']} CVEs",
-                        "year": None,
-                    })
+                    results.append(
+                        {
+                            "type": "Vendor",
+                            "id": row["vendor"],
+                            "title": row["vendor"],
+                            "subtitle": f"{row['cve_count']} CVEs",
+                            "year": None,
+                        }
+                    )
 
         # Search by CWE
         if len(results) < limit:
@@ -105,13 +115,15 @@ async def global_search(query: str, limit: int = 50) -> list:
                 (search_term, limit - len(results)),
             ) as cursor:
                 for row in await cursor.fetchall():
-                    results.append({
-                        "type": "CWE",
-                        "id": row["cwe_id"],
-                        "title": row["cwe_id"],
-                        "subtitle": "Weakness type",
-                        "year": None,
-                    })
+                    results.append(
+                        {
+                            "type": "CWE",
+                            "id": row["cwe_id"],
+                            "title": row["cwe_id"],
+                            "subtitle": "Weakness type",
+                            "year": None,
+                        }
+                    )
 
     return results[:limit]
 

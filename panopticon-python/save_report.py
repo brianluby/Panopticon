@@ -3,9 +3,10 @@ Persistence layer for Panopticon chat reports.
 CLI-driven CRUD over SQLite: save, list, load, delete (single/bulk),
 pinning, tagging, and legacy-row cleanup.
 """
-import sys
-import sqlite3
+
 import json
+import sqlite3
+import sys
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -36,9 +37,13 @@ def init_db():
     if "vendor" not in columns:
         cursor.execute("ALTER TABLE chat_reports ADD COLUMN vendor TEXT DEFAULT ''")
     if "pinned" not in columns:
-        cursor.execute("ALTER TABLE chat_reports ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0")
+        cursor.execute(
+            "ALTER TABLE chat_reports ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0"
+        )
     if "tags" not in columns:
-        cursor.execute("ALTER TABLE chat_reports ADD COLUMN tags TEXT NOT NULL DEFAULT '[]'")
+        cursor.execute(
+            "ALTER TABLE chat_reports ADD COLUMN tags TEXT NOT NULL DEFAULT '[]'"
+        )
     conn.commit()
     return conn
 
@@ -172,7 +177,9 @@ def toggle_pin(report_id):
     """Flip the pinned flag. Returns the new state or None if not found."""
     conn = init_db()
     cursor = conn.cursor()
-    cursor.execute("UPDATE chat_reports SET pinned = 1 - pinned WHERE id = ?", (report_id,))
+    cursor.execute(
+        "UPDATE chat_reports SET pinned = 1 - pinned WHERE id = ?", (report_id,)
+    )
     conn.commit()
     cursor.execute("SELECT pinned FROM chat_reports WHERE id = ?", (report_id,))
     row = cursor.fetchone()
@@ -198,7 +205,10 @@ def set_tags(report_id, tags_json):
             break
     conn = init_db()
     cursor = conn.cursor()
-    cursor.execute("UPDATE chat_reports SET tags = ? WHERE id = ?", (json.dumps(cleaned), report_id))
+    cursor.execute(
+        "UPDATE chat_reports SET tags = ? WHERE id = ?",
+        (json.dumps(cleaned), report_id),
+    )
     conn.commit()
     updated = cursor.rowcount
     conn.close()
@@ -219,7 +229,9 @@ def purge_invalid():
         except (json.JSONDecodeError, TypeError):
             bad_ids.append(row[0])
     if bad_ids:
-        cursor.executemany("DELETE FROM chat_reports WHERE id = ?", [(i,) for i in bad_ids])
+        cursor.executemany(
+            "DELETE FROM chat_reports WHERE id = ?", [(i,) for i in bad_ids]
+        )
         conn.commit()
     conn.close()
     return len(bad_ids)
